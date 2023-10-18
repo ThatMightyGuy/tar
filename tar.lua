@@ -9,46 +9,16 @@
 
 -- Sample code is MIT licensed -- Copyright (C) 2011 InfusedDreams. All Rights Reserved.
 
-module(..., package.seeall)
+-- Lua File System 
+-- (nevermind, that's OpenOS Filesystem API)
+local fs = require("filesystem")
 
--- Lua File System
-local lfs = require "lfs"
+local tar = {}
 
 local blocksize = 512
-local _ceil = math.ceil
-local _tonumber = tonumber
-local _ioOpen = io.open
-local byte = string.byte
-
-
---- Strip the path off a path+filename.
--- @param pathname string: A path+name, such as "/a/b/c"
--- or "\a\b\c".
--- @return string: The filename without its path, such as "c".
-function base_name(pathname)
-   assert(type(pathname) == "string")
-
-   local base = pathname:match(".*[/\\]([^/\\]*)")
-   return base or pathname
-end
-
---- Strip the name off a path+filename.
--- @param pathname string: A path+name, such as "/a/b/c".
--- @return string: The filename without its path, such as "/a/b/".
--- For entries such as "/a/b/", "/a/" is returned. If there are
--- no directory separators in input, "" is returned.
-function dir_name(pathname)
-   assert(type(pathname) == "string")
-
-   return (pathname:gsub("/*$", ""):match("(.*/)[^/]*")) or ""
-end
-
-function strip_base_dir(pathname)
-   return pathname:gsub("^[^/]*/", "")
-end
 
 -- trim5 from http://lua-users.org/wiki/StringTrim
-function trim(s)
+local function trim(s)
   return s:match'^%s*(.*%S)' or ''
 end
 
@@ -75,7 +45,7 @@ local function octal_to_number(octal)
 	local number = 0
 	octal = trim(octal)
 	for i = #octal,1,-1 do
-		local digit = _tonumber(octal:sub(i,i))
+		local digit = tonumber(octal:sub(i,i))
 		if not digit then break end
 		number = number + (digit * 8^exp)
 		exp = exp + 1
@@ -137,25 +107,17 @@ local function read_header_block(block)
 	return header
 end
 
-function untar(filename, fileDir, destdir, onComplete)
+function tar.untar(filename, fileDir, destdir, onComplete)
 	local destPath = ""
-	local filePath = system.pathForFile(filename, fileDir)
+	local filePath = fs.pathForFile(filename, fileDir)
 
-	local testForFile = _ioOpen(filePath, "rb")
-
-	if not testForFile then
+	if not fs.exists(filePath) then
 		print("TAR ERROR : File Not Found, Please check the file exists in the path specified")
 	end
 
-	if destdir == system.DocumentsDirectory then
-		destPath = system.pathForFile("", system.DocumentsDirectory)
-	elseif destdir == system.TemporaryDirectory then
-		destPath = system.pathForFile("", system.TemporaryDirectory)
-	else
-		destPath = destdir
-	end
+	destPath = destdir
 
-	local tar_handle = _ioOpen(filePath, "rb")
+	local tar_handle = io.open(filePath, "rb")
 	if not tar_handle then return nil, "Error opening file "..filename end
 
 	local long_name, long_link_name
@@ -170,10 +132,11 @@ function untar(filename, fileDir, destdir, onComplete)
 		local header, err = read_header_block(block)
 		if not header then
 			print(err)
+			header = {}
 		end
 
 		-- read entire file that follows header
-		local file_data = tar_handle:read(_ceil(header.size / blocksize) * blocksize):sub(1,header.size)
+		local file_data = tar_handle:read(math.ceil(header.size / blocksize) * blocksize):sub(1,header.size)
 
 		if header.typeflag == "long name" then
 			long_name = nullterm(file_data)
@@ -204,9 +167,9 @@ function untar(filename, fileDir, destdir, onComplete)
 		end
 
 		if header.typeflag == "directory" then
-			lfs.mkdir( pathname )
+			fs.mkdir(pathname)
 		elseif header.typeflag == "file" then
-			local file_handle = _ioOpen(pathname, "wb")
+			local file_handle = io.open(pathname, "wb")
 			file_handle:write(file_data)
 			file_handle:close()
 
@@ -224,3 +187,9 @@ function untar(filename, fileDir, destdir, onComplete)
 
 	return true
 end
+
+function tar.tar(path)
+	return nil, "Not implemented"
+end
+
+return tar
