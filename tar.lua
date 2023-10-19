@@ -181,7 +181,12 @@ local function write_header(filename, size, mode, type)
 	return header
 end
 
-function tar.decompress(filePath, destdir, onComplete)
+-- Decompresses a tar archive.
+-- convertPaths decides whether absolute paths should be made relative to destination.
+-- Also has a completion callback
+function tar.decompress(filePath, destPath, convertPaths, onComplete)
+	filePath = shell.resolve(filePath)
+	destPath = shell.resolve(destPath)
 	if onComplete then
 		local t = type(onComplete)
 		if t ~= "function" then
@@ -189,13 +194,9 @@ function tar.decompress(filePath, destdir, onComplete)
 		end
 	end
 
-	local destPath = ""
-
 	if not fs.exists(filePath) then
 		return nil, "File not found: "..filePath
 	end
-
-	destPath = destdir
 
 	local tar_handle = io.open(filePath, "rb")
 	if not tar_handle then return nil, "Error opening "..filePath end
@@ -236,6 +237,9 @@ function tar.decompress(filePath, destdir, onComplete)
 
 		local pathname
 
+		if convertPaths and header.name:sub(1, 1) == "/" then header.name = header.name:sub(2) end
+
+		-- WHY???
 		if (false) then
 			pathname = destPath.."/"..header.name
 		else
@@ -249,8 +253,9 @@ function tar.decompress(filePath, destdir, onComplete)
 		if header.typeflag == "directory" then
 			fs.makeDirectory(pathname)
 		elseif header.typeflag == "file" then
-			local file_handle = io.open(pathname, "wb")
-			if not file_handle then return nil, "Error opening file "..pathname end
+			fs.makeDirectory(fs.path(pathname))
+			local file_handle, ferr = io.open(pathname, "wb")
+			if not file_handle then return nil, "Error opening file "..pathname..": "..ferr end
 			file_handle:write(file_data)
 			file_handle:close()
 
@@ -261,7 +266,7 @@ function tar.decompress(filePath, destdir, onComplete)
 	return true
 end
 
-local function compress_file(src, dest)
+local function compress_file(src, dest, absolutePaths)
 	local srcfile = io.open(src, "rb")
 	if not srcfile then return nil, "Error opening source file "..src end
 	local destfile = io.open(dest, "ab")
@@ -269,7 +274,7 @@ local function compress_file(src, dest)
 
 	local fileSize = srcfile:seek("end")
 	srcfile:seek("set")
-	-- local mode = string.format("%o", 777) -- Set desired permissions
+	if (not absolutePaths) and src:sub(1, 1) == "/" then src = src:sub(2) end
 	local header = write_header(src, fileSize, "000666", 0)
 	destfile:write(header)
 
@@ -288,7 +293,7 @@ end
 -- Compresses a file/directory with an optional filter function and a completion callback.
 -- Please note that it does not fill a zero block at the end, as it's more work
 -- and GNU tar silently ignores it unless a flag is set
-function tar.compress(src, dest, filter, onComplete)
+function tar.compress(src, dest, filter, absolutePaths, onComplete)
 	src = shell.resolve(src)
 	dest = shell.resolve(dest)
 
@@ -315,7 +320,7 @@ function tar.compress(src, dest, filter, onComplete)
 					recursiveCompress(filePath)
 				else
 					filePath = path..file
-					local status, err = compress_file(filePath, dest)
+					local status, err = compress_file(filePath, dest, absolutePaths)
 					if not status then return nil, err end
 				end
 				if tar.verbose then print(filePath) end
