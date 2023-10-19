@@ -10,18 +10,68 @@
 -- Sample code is MIT licensed -- Copyright (C) 2011 InfusedDreams. All Rights Reserved.
 
 -- Lua File System 
--- (nevermind, that's OpenOS Filesystem API)
+-- (nevermind, that's OpenOS Filesystem API): https://ocdoc.cil.li/api:filesystem
 local fs = require("filesystem")
+local shell = require("shell")
 
 local tar = {}
 
 local blocksize = 512
 
 -- trim5 from http://lua-users.org/wiki/StringTrim
-local function trim(s)
-  return s:match'^%s*(.*%S)' or ''
+local function trim(str)
+  return str:match'^%s*(.*%S)' or ''
 end
 
+local hlens = {
+	name = 100,
+	mode = 8,
+	uid = 8,
+	gid = 8,
+	size = 12,
+	mtime = 12,
+	chksum = 8,
+	typeflag = 1;
+	linkname = 100,
+	magic = 6,
+	version = 2,
+	uname = 32,
+	gname = 32,
+	devmajor = 8,
+	devminor = 8,
+	prefix = 155,
+	filler = 12
+}
+
+-- Pads the string to the right.
+-- Why? Maximum width of string.format is only 99 characters:
+-- https://www.reddit.com/r/lua/comments/vegc9u/stringformat_has_a_maximum_field_width_or/
+local function right_pad(str, char, len)
+	str = tostring(str)
+	return str..char:rep(len - #str)
+end
+
+-- Pads the string to the left.
+-- Why? Maximum width of string.format is only 99 characters:
+-- https://www.reddit.com/r/lua/comments/vegc9u/stringformat_has_a_maximum_field_width_or/
+local function left_pad(str, char, len)
+	str = tostring(str)
+	return char:rep(len - #str)..str
+end
+
+-- Sets the last char of a string to space (20h)
+local function space(str)
+	str = str:sub(1, -2)
+	str = str.." "
+	return str
+end
+
+-- Sets the last two chars of a string to 20 00
+local function space_term(str)
+	str = str:sub(1, -3)
+	str = str.." \0"
+	return str
+end
 
 local function get_typeflag(flag)
 	if flag == "0" or flag == "\0" then return "file"
@@ -37,7 +87,7 @@ local function get_typeflag(flag)
 	elseif flag == "L" then return "long name"
 	elseif flag == "K" then return "long link name"
 	end
-	return "unknown"
+	return nil
 end
 
 local function octal_to_number(octal)
@@ -60,6 +110,8 @@ The checksum is then written as a string giving the *octal*
 representation of the checksum. Maybe you forgot to convert
 your hand computed sum to octal ??.
 ]]
+
+-- I have no idea what this is about. Contributor left a message? David Gross himself? Doesn't matter.
 
 local function checksum_header(block)
 	local sum = 256
@@ -107,18 +159,46 @@ local function read_header_block(block)
 	return header
 end
 
-function tar.untar(filename, fileDir, destdir, onComplete)
+local function write_header(filename, size, mode, type)
+	size = left_pad(string.format("%o", size), "0", hlens.size - 1)
+	local header = right_pad(filename, "\0", hlens.name)
+	header = header..space_term(right_pad(mode, "\0", 8))
+	header = header..space_term(right_pad("000000", "\0", hlens.uid))
+	header = header..space_term(right_pad("000000", "\0", hlens.gid))
+	header = header..space(right_pad(size, "\0", hlens.size))
+	header = header..space(right_pad(left_pad(string.format("%o", os.time()), "0", hlens.mtime - 1), "\0", hlens.mtime))
+	header = header..space(right_pad("", " ", hlens.chksum))
+	header = header..right_pad(type, "\0", hlens.typeflag)
+	header = header..right_pad("", "\0", hlens.linkname)
+	header = header..right_pad("ustar", "\0", hlens.magic)
+	header = header..right_pad("00", "\0", hlens.version)
+	header = header..right_pad("", "\0", hlens.uname)
+	header = header..right_pad("", "\0", hlens.gname)
+	header = header..space_term(right_pad("000000", "\0", hlens.devmajor))
+	header = header..space_term(right_pad("000000", "\0", hlens.devminor))
+	header = header..right_pad("", "\0", hlens.prefix + hlens.filler)
+	header = header:sub(1, 148)..space(left_pad(string.format("%o", checksum_header(header)).."\0\0", "0", hlens.chksum))..header:sub(157)
+	return header
+end
+
+function tar.decompress(filePath, destdir, onComplete)
+	if onComplete then
+		local t = type(onComplete)
+		if t ~= "function" then
+			return nil, "onComplete: expected function, got "..t
+		end
+	end
+
 	local destPath = ""
-	local filePath = fs.pathForFile(filename, fileDir)
 
 	if not fs.exists(filePath) then
-		print("TAR ERROR : File Not Found, Please check the file exists in the path specified")
+		return nil, "File not found: "..filePath
 	end
 
 	destPath = destdir
 
 	local tar_handle = io.open(filePath, "rb")
-	if not tar_handle then return nil, "Error opening file "..filename end
+	if not tar_handle then return nil, "Error opening "..filePath end
 
 	local long_name, long_link_name
 	while true do
@@ -131,12 +211,13 @@ function tar.untar(filename, fileDir, destdir, onComplete)
 		if not block then break end
 		local header, err = read_header_block(block)
 		if not header then
-			print(err)
-			header = {}
+			-- Needs testing! Surely we don't want just a false here, or an empty table that
+			-- just will crash with a nil when accessed in the next line. How about, for now, we return an error?
+			return nil, err
 		end
 
 		-- read entire file that follows header
-		local file_data = tar_handle:read(math.ceil(header.size / blocksize) * blocksize):sub(1,header.size)
+		local file_data = tar_handle:read(math.ceil(header.size / blocksize) * blocksize):sub(1, header.size)
 
 		if header.typeflag == "long name" then
 			long_name = nullterm(file_data)
@@ -156,9 +237,8 @@ function tar.untar(filename, fileDir, destdir, onComplete)
 		local pathname
 
 		if (false) then
-			pathname = destPath .. "/" .. header.name
+			pathname = destPath.."/"..header.name
 		else
-
 			if (destPath and string.sub(destPath,-1) ~= "/") then
 				pathname = destPath.."/"..header.name
 			else
@@ -167,29 +247,88 @@ function tar.untar(filename, fileDir, destdir, onComplete)
 		end
 
 		if header.typeflag == "directory" then
-			fs.mkdir(pathname)
+			fs.makeDirectory(pathname)
 		elseif header.typeflag == "file" then
 			local file_handle = io.open(pathname, "wb")
+			if not file_handle then return nil, "Error opening file "..pathname end
 			file_handle:write(file_data)
 			file_handle:close()
 
 		end
 	end
 
-	if onComplete then
-		if type(onComplete) == "function" then
-			--print ("TAR COMPLETED...")
-			onComplete()
-		else
-			print("TAR ERROR : OnComplete must be a function")
-		end
-	end
+	if onComplete then onComplete() end
+	return true
+end
+
+local function compress_file(src, dest)
+	local srcfile = io.open(src, "rb")
+	if not srcfile then return nil, "Error opening source file "..src end
+	local destfile = io.open(dest, "ab")
+	if not destfile then return nil, "Error opening destination file "..dest end
+
+	local fileSize = srcfile:seek("end")
+	srcfile:seek("set")
+	-- local mode = string.format("%o", 777) -- Set desired permissions
+	local header = write_header(src, fileSize, "000666", 0)
+	destfile:write(header)
+
+	-- Write file content
+	destfile:write(srcfile:read("*a"))
+
+	local paddingBytes = (blocksize - (fileSize % blocksize)) % blocksize
+	destfile:write(string.rep("\0", paddingBytes))
+
+	srcfile:close()
+	destfile:close()
 
 	return true
 end
 
-function tar.tar(path)
-	return nil, "Not implemented"
+-- Compresses a file/directory with an optional filter function and a completion callback.
+-- Please note that it does not fill a zero block at the end, as it's more work
+-- and GNU tar silently ignores it unless a flag is set
+function tar.compress(src, dest, filter, onComplete)
+	src = shell.resolve(src)
+	dest = shell.resolve(dest)
+
+	local function isEligible(file)
+		local result = file ~= "." and file ~= ".."
+		if filter then result = result and filter() end
+		return result
+	end
+
+	if onComplete then
+		local t = type(onComplete)
+		if t ~= "function" then
+			return nil, "onComplete: expected function, got "..t
+		end
+	end
+	if fs.exists(dest) then return nil, "Destination file already exists" end
+	if not fs.isDirectory(src) then return compress_file(src, dest) end
+
+	local function recursiveCompress(path)
+		for file in fs.list(path) do
+			if isEligible(file) then
+				local filePath = path.."/"..file
+				if fs.isDirectory(filePath) then
+					recursiveCompress(filePath)
+				else
+					filePath = path..file
+					local status, err = compress_file(filePath, dest)
+					if not status then return nil, err end
+				end
+				if tar.verbose then print(filePath) end
+			end
+		end
+		return true
+	end
+
+	local status, err = recursiveCompress(src)
+	if not status then return nil, err end
+
+	if onComplete then onComplete() end
+	return true
 end
 
 return tar
